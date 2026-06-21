@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sleek Search Typeahead</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Main Style -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg-gradient"></div>
+    <div class="glow-orb" id="orb-1"></div>
+    <div class="glow-orb" id="orb-2"></div>
+
+    <div class="app-container">
+        <!-- HEADER -->
+        <header class="main-header">
+            <div class="logo">
+                <i class="fa-solid fa-wind logo-icon"></i>
+                <h1>AURA<span>Typeahead</span></h1>
+            </div>
+            <p class="subtitle">Distributed low-latency search typeahead with consistent hashing and batch writing.</p>
+        </header>
+
+        <!-- MAIN GRID CONTENT -->
+        <div class="dashboard-grid">
+            
+            <!-- LEFT SECTION: SEARCH INTERFACE -->
+            <section class="card glass-panel search-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-magnifying-glass header-icon"></i>Search Engine</h2>
+                    <div class="mode-selector">
+                        <span class="mode-label">Ranking Mode:</span>
+                        <button id="mode-basic-btn" class="mode-btn active" title="Sorts by overall historical counts">Basic (Popularity)</button>
+                        <button id="mode-recency-btn" class="mode-btn" title="Applies exponential decay over elapsed time">Enhanced (Recency-Aware)</button>
+                    </div>
+                </div>
+
+                <div class="search-engine-body">
+                    <!-- Dynamic Search Box -->
+                    <div class="search-box-container">
+                        <div class="input-wrapper">
+                            <i class="fa-solid fa-search input-search-icon"></i>
+                            <input type="text" id="search-input" placeholder="Type here (e.g. goog, yaho, java, map)..." autocomplete="off">
+                            <button id="search-clear-btn" class="clear-btn hidden"><i class="fa-solid fa-xmark"></i></button>
+                            <button id="search-submit-btn" class="submit-btn">Search</button>
+                        </div>
+                        
+                        <!-- Suggestions Dropdown -->
+                        <div id="suggestions-dropdown" class="suggestions-dropdown hidden">
+                            <ul id="suggestions-list"></ul>
+                        </div>
+                    </div>
+                    
+                    <!-- Search Results Dummy Panel -->
+                    <div id="search-results-panel" class="results-panel hidden">
+                        <div class="results-content">
+                            <div class="results-icon"><i class="fa-solid fa-square-check"></i></div>
+                            <div class="results-text">
+                                <h3 id="results-title">Searched successfully!</h3>
+                                <p id="results-desc">Your search count will update in the database via the batch writing queue.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Trending Section -->
+                    <div class="trending-section">
+                        <h3><i class="fa-solid fa-fire trending-icon"></i>Trending Searches</h3>
+                        <div id="trending-tags" class="trending-tags">
+                            <!-- Populated dynamically -->
+                            <span class="trending-loading">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- RIGHT SECTION: METRICS & DEBUGGING -->
+            <section class="card glass-panel metrics-card">
+                <div class="card-header">
+                    <h2><i class="fa-solid fa-chart-simple header-icon"></i>Live Metrics Dashboard</h2>
+                    <span id="metrics-status-dot" class="status-badge connected">Live connected</span>
+                </div>
+
+                <div class="metrics-grid">
+                    <!-- Metric Card 1: Hit Rate -->
+                    <div class="metric-item">
+                        <span class="metric-label">Cache Hit Rate</span>
+                        <div class="metric-value-container">
+                            <span id="metric-hit-rate" class="metric-value">0.0%</span>
+                            <div class="progress-bar">
+                                <div id="metric-hit-rate-bar" class="progress-fill" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <span class="metric-subtext"><span id="metric-hits">0</span> hits / <span id="metric-misses">0</span> misses</span>
+                    </div>
+
+                    <!-- Metric Card 2: P95 Latency -->
+                    <div class="metric-item">
+                        <span class="metric-label">P95 Latency</span>
+                        <span id="metric-latency" class="metric-value text-cyan">0.00 ms</span>
+                        <span class="metric-subtext">Avg Response: <span id="metric-avg-latency">0.00</span> ms</span>
+                    </div>
+
+                    <!-- Metric Card 3: Batch Buffer Status -->
+                    <div class="metric-item">
+                        <span class="metric-label">Batch Write Buffer</span>
+                        <div class="buffer-badge-container">
+                            <span id="metric-buffer-size" class="buffer-badge">0 / 50</span>
+                        </div>
+                        <span class="metric-subtext">Next Flush: <span id="metric-flush-countdown">10s</span> | Total Flushes: <span id="metric-flush-count">0</span></span>
+                    </div>
+
+                    <!-- Metric Card 4: Database Reads & Writes -->
+                    <div class="metric-item">
+                        <span class="metric-label">DB Reads / Writes</span>
+                        <span class="metric-value text-purple"><span id="metric-db-reads">0</span> / <span id="metric-db-writes">0</span></span>
+                        <span class="metric-subtext">Writes saved through batching: <span id="metric-write-saved">0</span></span>
+                    </div>
+                </div>
+
+                <!-- ROUTING & CONSISTENT HASH RING DEBUG -->
+                <div class="debug-routing-section">
+                    <h3><i class="fa-solid fa-route debug-icon"></i>Consistent Hashing Ring Debugger</h3>
+                    
+                    <div class="routing-visualizer">
+                        <div class="routing-input-info">
+                            <div class="info-group">
+                                <span class="info-label">Active Key Prefix</span>
+                                <span id="debug-prefix" class="info-val text-yellow">-</span>
+                            </div>
+                            <div class="info-group">
+                                <span class="info-label">Key MD5 Hash</span>
+                                <span id="debug-hash" class="info-val text-gray">-</span>
+                            </div>
+                            <div class="info-group">
+                                <span class="info-label">Routed Node</span>
+                                <span id="debug-node" class="info-val text-green">-</span>
+                            </div>
+                        </div>
+
+                        <!-- Node Cluster Status -->
+                        <div class="node-cluster">
+                            <div id="node-card-redis-1" class="node-card">
+                                <i class="fa-solid fa-server node-icon"></i>
+                                <span class="node-name">redis-1</span>
+                                <span class="node-port">Port 6379</span>
+                                <span class="node-keys-badge"><span id="node-keys-redis-1">0</span> keys</span>
+                            </div>
+                            <div id="node-card-redis-2" class="node-card">
+                                <i class="fa-solid fa-server node-icon"></i>
+                                <span class="node-name">redis-2</span>
+                                <span class="node-port">Port 6380</span>
+                                <span class="node-keys-badge"><span id="node-keys-redis-2">0</span> keys</span>
+                            </div>
+                            <div id="node-card-redis-3" class="node-card">
+                                <i class="fa-solid fa-server node-icon"></i>
+                                <span class="node-name">redis-3</span>
+                                <span class="node-port">Port 6381</span>
+                                <span class="node-keys-badge"><span id="node-keys-redis-3">0</span> keys</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
