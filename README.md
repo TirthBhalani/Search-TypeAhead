@@ -71,7 +71,7 @@ graph TD
 ---
 
 ## 📊 Dataset Specifications
-The typeahead suggestions are populated using a filtered version of the **AOL Search Query Collection**. 
+The typeahead suggestions are populated using a filtered version of the [AOL User Session Collection (Kaggle)](https://www.kaggle.com/datasets/dineshydv/aol-user-session-collection-500k). 
 
 *   **Size**: 100,000+ unique queries.
 *   **Preprocessing (`scripts/clean_data.py`)**:
