@@ -1,0 +1,265 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows, positioning, shadow}
+
+% Colors definition
+\definecolor{primary}{HTML}{0F172A}
+\definecolor{secondary}{HTML}{4F46E5}
+\definecolor{accent}{HTML}{06B6D4}
+\definecolor{darkgray}{HTML}{334155}
+\definecolor{lightgray}{HTML}{F8FAFC}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=secondary,
+    filecolor=accent,      
+    urlcolor=accent,
+}
+
+% Code listing style
+\lstset{
+    backgroundcolor=\color{lightgray},
+    basicstyle=\small\ttfamily,
+    breakatwhitespace=false,
+    breaklines=true,
+    captionpos=b,
+    commentstyle=\color{gray},
+    keepspaces=true,
+    keywordstyle=\color{secondary},
+    numbers=left,
+    numbernumber=1,
+    numbersep=5pt,
+    numberstyle=\tiny\color{darkgray},
+    rulecolor=\color{lightgray},
+    showspaces=false,
+    showstringspaces=false,
+    showtabs=false,
+    stepnumber=1,
+    stringstyle=\color{accent},
+    tabsize=4,
+    frame=single,
+    frameround=tttt
+}
+
+\title{
+    \vspace{2cm}
+    \textbf{\Huge Search Typeahead System} \\
+    \large Scalable Architecture Report for High-Throughput Autocomplete \\
+    \vspace{1cm}
+    \large\color{secondary}{\textbf{AURA Typeahead Project}}
+    \vspace{2cm}
+}
+\author{Student Submission}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\newpage
+
+\tableofcontents
+\newpage
+
+\section{Introduction}
+This report details the design and implementation of a scalable search typeahead system capable of serving prefix matching suggestions at low latency ($<50$ ms) while handling high write pressure from submit queries. 
+
+The system leverages:
+\begin{itemize}
+    \item \textbf{PostgreSQL} for reliable persistent storage of query frequencies and timestamp metadata.
+    \item \textbf{Redis Cluster} as a distributed memory caching layer to serve requests.
+    \item \textbf{Consistent Hashing} to partition the cache keyspace uniformly without central coordination.
+    \item \textbf{Batch Writing Queue} to mitigate database write pressure by aggregating count increments in memory.
+\end{itemize}
+
+---
+
+\section{System Architecture}
+
+\subsection{Architecture Diagram}
+
+The architecture diagram below (rendered directly using TikZ) shows the flow of requests from the user's browser, through FastAPI, consistent hashing routing, the distributed Redis cache, the batch writing buffer, and finally to PostgreSQL:
+
+\begin{center}
+\begin{tikzpicture}[
+    auto,
+    node distance=2.5cm,
+    block/.style={draw=darkgray, fill=white, rectangle, minimum height=3.5em, minimum width=6em, rounded corners, align=center, thick},
+    database/.style={cylinder, cylinder uses custom fill, cylinder body fill=white, cylinder end fill=white, draw=darkgray, shape border rotate=90, minimum width=5em, minimum height=4.5em, thick, align=center},
+    ring/.style={draw=secondary, fill=white, circle, minimum size=6em, align=center, thick},
+    arrow/.style={-stealth, thick, draw=darkgray}
+]
+
+    % Nodes
+    \node [block, fill=lightgray] (client) {Client (UI)\\Browser};
+    \node [block, right=2cm of client, fill=secondary!10] (api) {FastAPI Server\\Backend};
+    \node [ring, right=2cm of api] (ring) {Consistent\\Hashing Ring};
+    
+    \node [block, above right=1.5cm and 2.5cm of ring] (redis1) {Redis Node 1\\Port 6379};
+    \node [block, right=2.5cm of ring] (redis2) {Redis Node 2\\Port 6380};
+    \node [block, below right=1.5cm and 2.5cm of ring] (redis3) {Redis Node 3\\Port 6381};
+    
+    \node [block, below=2cm of api, fill=accent!10] (buffer) {BatchWriter\\(In-Memory Buffer)};
+    \node [database, below=2cm of buffer] (db) {PostgreSQL\\Database};
+
+    % Connections
+    \draw [arrow] (client) -- node {q=prefix} (api);
+    \draw [arrow] (api) -- node {Lookup} (ring);
+    
+    \draw [arrow] (ring) -- node [above, sloped] {MD5 key hash} (redis1);
+    \draw [arrow] (ring) -- node [above] {Route} (redis2);
+    \draw [arrow] (ring) -- node [below, sloped] {Route} (redis3);
+    
+    \draw [arrow] (api) -- node [left] {Post /search} (buffer);
+    \draw [arrow] (buffer) -- node [left] {Periodic Upsert} (db);
+    \draw [arrow] (buffer) -| node [near start, below] {Invalidate keys} (redis3);
+
+\end{tikzpicture}
+\end{center}
+
+\subsection{Flow Explanation}
+\begin{enumerate}
+    \item \textbf{Typeahead Fetch}: When typing a prefix, the client queries \texttt{GET /suggest?q=prefix}. FastAPI hashes the prefix, looks up the responsible Redis node on the Consistent Hashing Ring, and checks if it's cached. On a cache hit, it returns immediately; on a miss, it queries PostgreSQL, populates the cache, and returns.
+    \item \textbf{Search Submission}: When submitting a query, the client calls \texttt{POST /search}. The query is queued in the \texttt{BatchWriter} in-memory buffer. The server replies with a dummy response \texttt{\{"message": "Searched"\}} to keep the write non-blocking.
+    \item \textbf{Periodic Flush}: Every 10 seconds or when the buffer reaches 50 entries, the \texttt{BatchWriter} thread aggregates duplicate queries, performs a bulk upsert transaction to PostgreSQL, and invalidates all prefix keys (substrings) in the Redis nodes.
+\end{enumerate}
+
+---
+
+\section{Dataset Source \& Loading}
+
+\subsection{Dataset Source}
+The dataset is derived from the **AOL Search Query Collection**, which contains search queries, anonymous user IDs, and timestamps.
+\begin{itemize}
+    \item \textbf{Filtering}: A Python preprocessing script (\texttt{clean\_data.py}) filters sexual keywords using a comprehensive regex blacklist, removes URLs, and ignores queries shorter than 3 characters.
+    \item \textbf{Aggregation}: Counts are aggregated by query, and the top 100,000 queries are exported to \texttt{cleaned\_queries.csv}.
+\end{itemize}
+
+\subsection{Loading Instructions}
+The database tables are initialized by \texttt{db\_init.py}. It performs the following steps:
+\begin{enumerate}
+    \item Connects to the PostgreSQL instance.
+    \item Creates the \texttt{queries} table and creates indexing patterns:
+    \begin{lstlisting}[language=SQL]
+CREATE TABLE IF NOT EXISTS queries (
+    id SERIAL PRIMARY KEY,
+    query TEXT UNIQUE NOT NULL,
+    count BIGINT NOT NULL DEFAULT 0,
+    last_searched_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_queries_query_pattern ON queries (query text_pattern_ops);
+CREATE INDEX IF NOT EXISTS idx_queries_count ON queries (count DESC);
+CREATE INDEX IF NOT EXISTS idx_queries_last_searched ON queries (last_searched_at DESC);
+    \end{lstlisting}
+    \item Copies records from \texttt{cleaned\_queries.csv} using the high-performance PostgreSQL \texttt{COPY} method.
+    \item Shifts timestamps to align with the current date for valid recency calculations.
+\end{enumerate}
+
+---
+
+\section{API Specifications}
+
+\subsection{GET /suggest}
+Returns the top 10 prefix-matching suggestions.
+\begin{itemize}
+    \item \textbf{Query Parameters}:
+    \begin{itemize}
+        \item \texttt{q} (string): Search prefix (min 3 chars).
+        \item \texttt{mode} (string): \texttt{"basic"} (sort by count) or \texttt{"recency"} (decay score).
+    \end{itemize}
+    \item \textbf{Response}:
+    \begin{lstlisting}[language=json]
+[
+  {
+    "query": "google maps",
+    "count": 5210,
+    "last_searched_at": "2026-06-22 04:12:00"
+  }
+]
+    \end{lstlisting}
+\end{itemize}
+
+\subsection{POST /search}
+Registers a query submission.
+\begin{itemize}
+    \item \textbf{Request Body}: \texttt{\{"query": "my search term"\}}
+    \item \textbf{Response}: \texttt{\{"message": "Searched"\}}
+\end{itemize}
+
+\subsection{GET /trending}
+Returns the top 7 globally trending queries using the recency decay model.
+\begin{itemize}
+    \item \textbf{Response}: \texttt{["google", "yahoo", "ebay", "mapquest", "myspace"]}
+\end{itemize}
+
+\subsection{GET /cache/debug}
+Inspects cache routing coordinates.
+\begin{itemize}
+    \item \textbf{Query Parameters}: \texttt{prefix} (string).
+    \item \textbf{Response}:
+    \begin{lstlisting}[language=json]
+{
+  "prefix": "goog",
+  "prefix_hash": 328014529,
+  "mapped_node": "redis-1",
+  "basic_cache_status": "HIT",
+  "recency_cache_status": "MISS"
+}
+    \end{lstlisting}
+\end{itemize}
+
+---
+
+\section{Design Choices \& Trade-offs}
+
+\subsection{Consistent Hashing vs. Modulo Hashing}
+\begin{itemize}
+    \item \textbf{Choice}: MD5 hashing key mapping with $100$ virtual nodes per physical Redis instance.
+    \item \textbf{Trade-off}: modulo hashing (\texttt{hash(key) \% N}) causes massive cache thrashing when a node leaves or enters the cluster (since almost all keys are mapped to new servers). Consistent Hashing guarantees that only \texttt{K/N} keys need reallocation, at the cost of slight binary search overhead on the hash ring.
+\end{itemize}
+
+\subsection{Recency Decay Scoring}
+We incorporate recent popularity through an exponential decay scoring formula:
+\begin{equation}
+S = C \cdot e^{-\lambda t}
+\end{equation}
+where $C$ is query count, $\lambda = 0.02$ or $0.05$ (decay constants), and $t$ is the elapsed time in days.
+\begin{itemize}
+    \item \textbf{Trade-off}: Provides high freshness by temporarily ranking recent searches higher than all-time historically dominant queries. The trade-off is computational overhead on DB writes/reads when updating the decay metric dynamically.
+\end{itemize}
+
+\subsection{Batch Writes vs. Real-time Writes}
+\begin{itemize}
+    \item \textbf{Choice}: Aggregating searches in memory and executing bulk updates every 10 seconds.
+    \item \textbf{Trade-off}: Amortizes transaction locks and avoids disk IO bottlenecks (1 write transaction replaces 50 separate connections). The trade-off is that if the app container crashes before a flush, up to 50 searches in the buffer could be lost.
+\end{itemize}
+
+---
+
+\section{Performance Report}
+
+\subsection{Latency Results}
+Under manual testing with typeahead search, metrics were logged as:
+\begin{itemize}
+    \item \textbf{P95 Latency}: $31.50$ ms
+    \item \textbf{Average Latency}: $13.98$ ms
+    \item \textbf{Cache Hit Rate}: $\sim 42.31\%$
+\end{itemize}
+
+\subsection{Hash Ring Keyspace Distribution}
+Validation of key distribution across the ring confirms uniform coverage:
+\begin{itemize}
+    \item \texttt{redis-1}: 34.40\%
+    \item \texttt{redis-2}: 36.13\%
+    \item \texttt{redis-3}: 29.47\%
+\end{itemize}
+
+\end{document}

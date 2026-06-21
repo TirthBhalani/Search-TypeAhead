@@ -1,0 +1,11 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Raw large dataset files
+data/user-ct-test-collection-02.txt
+
+# Local logs and IDE artifacts
+.system_generated/
+*.log
+.gemini/
